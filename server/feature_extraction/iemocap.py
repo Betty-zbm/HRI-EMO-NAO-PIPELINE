@@ -17,11 +17,7 @@ import numpy as np
 import torch
 from transformers import AutoFeatureExtractor, AutoModel, AutoTokenizer
 
-from server.audio_utils import prepare_wavlm_input
-
-# ---------------------------------------------------------------------------
 # Fixed IEMOCAP extractor settings (same defaults as offline scripts)
-# ---------------------------------------------------------------------------
 WAVLM_MODEL_NAME = "microsoft/wavlm-base-plus"
 BERT_MODEL_NAME = "bert-base-uncased"
 TARGET_SAMPLE_RATE = 16_000
@@ -29,33 +25,72 @@ MAX_AUDIO_SECONDS = 10.0
 BERT_MAX_LEN = 128
 
 
+def preprocess_audio_for_wavlm(
+    wav_np: np.ndarray,
+    *,
+    target_sr: int = TARGET_SAMPLE_RATE,
+    max_seconds: float = MAX_AUDIO_SECONDS,
+) -> np.ndarray:
+    """
+    Pad or truncate a decoded waveform to fixed length for WavLM.
+
+    Expects mono float32 input from ``decode_wav_bytes`` (16 kHz, peak-normalized,
+    truncated to ``max_seconds``). This step only adds zero-padding when the clip
+    is shorter than ``max_seconds`` — matching
+    ``extract_audio_feats_wavlm_seq.py`` lines 81–87.
+
+    Args:
+        wav_np: Decoded mono float32 waveform.
+        target_sr: Sample rate (default 16 kHz).
+        max_seconds: Fixed clip length in seconds for WavLM input.
+
+    Returns:
+        Float32 waveform of shape [target_sr * max_seconds].
+    """
+    max_len_samples = int(target_sr * max_seconds)
+    wav_t = torch.from_numpy(wav_np.astype(np.float32))
+
+    if wav_t.numel() > max_len_samples:
+        wav_t = wav_t[:max_len_samples]
+    else:
+        pad = max_len_samples - wav_t.numel()
+        if pad > 0:
+            wav_t = torch.nn.functional.pad(wav_t, (0, pad))
+
+    return wav_t.detach().cpu().numpy()
+
+
 @dataclass
 class SeqFeatures:
     """
-    Sequence-level multimodal features in the same format as offline ``.pt`` files.
+    Sequence features ready for a single-sample fusion-decoder forward pass.
 
-    Both IEMOCAP and MOSEI extractors return this container so the inference
-    engine can feed fusion models with a uniform interface.
+    Online extractors convert encoder outputs into the batch layout expected by
+    ``FusionWithEmotionDecoder`` / ``MoseiFusionWithEmotionDecoder`` (B=1).
     """
 
-    hidden: torch.Tensor  # [L, D] — frame/word hidden states
-    attention_mask: torch.Tensor  # [L], 1 = valid token, 0 = padding
+    hidden: torch.Tensor  # [1, L, D] float
+    key_padding_mask: torch.Tensor  # [1, L] bool, True = padded position
 
-    def to_model_inputs(self) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Convert stored features into fusion-model batch tensors.
 
-        The fusion decoder expects:
-          - hidden with shape [batch, seq_len, dim]
-          - key_padding_mask with shape [batch, seq_len] where True marks PAD
+def pack_seq_features(
+    hidden: torch.Tensor,
+    attention_mask: torch.Tensor,
+) -> SeqFeatures:
+    """
+    Pack per-sequence encoder outputs into fusion-decoder batch tensors.
 
-        Returns:
-            hidden: float tensor [1, L, D]
-            key_padding_mask: bool tensor [1, L], True = padded position
-        """
-        hidden = self.hidden.unsqueeze(0).float()
-        key_padding_mask = (self.attention_mask == 0).unsqueeze(0)
-        return hidden, key_padding_mask
+    Args:
+        hidden: Frame/word hidden states [L, D].
+        attention_mask: Valid-token mask [L], 1 = valid and 0 = padding (HF convention).
+
+    Returns:
+        SeqFeatures with ``hidden`` [1, L, D] and ``key_padding_mask`` [1, L].
+    """
+    return SeqFeatures(
+        hidden=hidden.unsqueeze(0).float(),
+        key_padding_mask=(attention_mask == 0).unsqueeze(0),
+    )
 
 
 def downsample_mask_linear(mask_b_l: torch.Tensor, t_prime: int) -> torch.Tensor:
@@ -108,14 +143,14 @@ class IemocapFeatureExtractor:
             self._device = "cuda" if torch.cuda.is_available() else "cpu"
         return self._device
 
-    def _ensure_audio_models(self) -> None:
+    def _load_wavlm(self) -> None:
         """Load WavLM feature extractor and backbone if not already in memory."""
         if self._wavlm is not None:
             return
         self._wavlm_fe = AutoFeatureExtractor.from_pretrained(WAVLM_MODEL_NAME)
         self._wavlm = AutoModel.from_pretrained(WAVLM_MODEL_NAME).to(self.device).eval()
 
-    def _ensure_text_models(self) -> None:
+    def _load_bert(self) -> None:
         """Load BERT tokenizer and backbone if not already in memory."""
         if self._bert is not None:
             return
@@ -125,28 +160,21 @@ class IemocapFeatureExtractor:
     @torch.no_grad()
     def extract_audio(self, wav_np: np.ndarray) -> SeqFeatures:
         """
-        Extract WavLM sequence features from a mono waveform.
+        Extract WavLM sequence features from a preprocessed mono waveform.
 
-        Processing steps:
-          1. Pad/truncate waveform to ``MAX_AUDIO_SECONDS`` (offline script parity).
-          2. Run WavLM feature extractor + forward pass.
-          3. Downsample the FE attention mask to hidden-state length.
-          4. Return CPU tensors matching offline ``{uid}.pt`` layout.
+        Expects output of ``preprocess_audio_for_wavlm`` (fixed 10 s length).
+        Steps:
+          1. Run WavLM feature extractor + forward pass.
+          2. Downsample the FE attention mask to hidden-state length.
+          3. Return fusion-decoder-ready tensors [1, T', 768].
 
         Args:
-            wav_np: Mono float32 waveform (any sample rate; resampling happens
-                upstream in the pipeline).
+            wav_np: Mono float32 waveform, already padded/truncated for WavLM.
 
         Returns:
-            SeqFeatures with ``hidden`` [T', 768] and ``attention_mask`` [T'].
+            SeqFeatures with ``hidden`` [1, T', 768] and ``key_padding_mask`` [1, T'].
         """
-        self._ensure_audio_models()
-
-        wav_np = prepare_wavlm_input(
-            wav_np,
-            target_sr=TARGET_SAMPLE_RATE,
-            max_seconds=MAX_AUDIO_SECONDS,
-        )
+        self._load_wavlm()
 
         inputs = self._wavlm_fe(
             [wav_np],
@@ -155,16 +183,19 @@ class IemocapFeatureExtractor:
             padding="longest",
             return_attention_mask=True,
         )
+        # Convert to PyTorch tensors and move to device
         inputs = {key: value.to(self.device) for key, value in inputs.items()}
 
+        # Forward pass through WavLM
         outputs = self._wavlm(**inputs)
+        # Extract hidden states and attention mask
         hidden_states = outputs.last_hidden_state  # [1, T', H]
         _batch, t_prime, _hidden_dim = hidden_states.shape
 
         attn_down = downsample_mask_linear(inputs["attention_mask"], t_prime).squeeze(0).cpu().long()
         hidden = hidden_states.squeeze(0).cpu()
 
-        return SeqFeatures(hidden=hidden, attention_mask=attn_down)
+        return pack_seq_features(hidden, attn_down)
 
     @torch.no_grad()
     def extract_text(self, text: str) -> SeqFeatures:
@@ -178,10 +209,10 @@ class IemocapFeatureExtractor:
             text: Transcript string (Whisper output or placeholder).
 
         Returns:
-            SeqFeatures with ``hidden`` [L, 768] and ``attention_mask`` [L].
+            SeqFeatures with ``hidden`` [1, L, 768] and ``key_padding_mask`` [1, L].
         """
-        self._ensure_text_models()
-
+        self._load_bert()
+        # Tokenize transcript into alphanumeric words (regex)
         encodings = self._tokenizer(
             text,
             truncation=True,
@@ -189,13 +220,16 @@ class IemocapFeatureExtractor:
             padding="max_length",
             return_tensors="pt",
         )
+        # Convert to PyTorch tensors and move to device
         encodings = {key: value.to(self.device) for key, value in encodings.items()}
 
+        # Forward pass through BERT
         outputs = self._bert(**encodings)
+        # Extract hidden states and attention mask
         hidden = outputs.last_hidden_state.squeeze(0).cpu()
         attention_mask = encodings["attention_mask"].squeeze(0).cpu()
 
-        return SeqFeatures(hidden=hidden, attention_mask=attention_mask)
+        return pack_seq_features(hidden, attention_mask)
 
     @torch.no_grad()
     def extract(self, wav_np: np.ndarray, text: str) -> tuple[SeqFeatures, SeqFeatures]:
@@ -203,10 +237,11 @@ class IemocapFeatureExtractor:
         Run audio and text extraction for a single utterance.
 
         Args:
-            wav_np: Preprocessed mono waveform.
+            wav_np: Decoded mono float32 waveform from ``decode_wav_bytes``.
             text: Transcript paired with the audio clip.
 
         Returns:
             Tuple of (audio_features, text_features).
         """
-        return self.extract_audio(wav_np), self.extract_text(text)
+        wav_lm = preprocess_audio_for_wavlm(wav_np)
+        return self.extract_audio(wav_lm), self.extract_text(text)
