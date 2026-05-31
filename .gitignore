@@ -1,7 +1,24 @@
-# === Ignore large data & generated outputs ===
-data/
-features/
-runs/
+# === Ignore large data & generated outputs (repo root only) ===
+/data/
+/features/
+/runs/
+
+# Python virtual environment
+venv/
+.venv/
+env/
+
+# Model checkpoints & caches
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+.cache/
+.huggingface/
+
+# Secrets
+.env
+.env.*
 
 # Jupyter & temp files
 *.ipynb_checkpoints/
@@ -9,6 +26,11 @@ __pycache__/
 *.pyc
 *.pyo
 *.log
+.pytest_cache/
+.mypy_cache/
+*.egg-info/
+dist/
+build/
 
 # OS-specific
 .DS_Store
