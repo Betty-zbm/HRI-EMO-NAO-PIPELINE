@@ -36,7 +36,7 @@ from server.config import (
     MOSEI_PREDICTION_THRESHOLD,
 )
 from server.feature_extraction import SeqFeatures
-from server.feature_extraction.mosei import MOSEI_AUDIO_DIM, MOSEI_TEXT_DIM
+from server.config import MOSEI_AUDIO_DIM, MOSEI_TEXT_DIM
 
 
 @dataclass
@@ -64,6 +64,27 @@ def _load_checkpoint(path: str, device: torch.device) -> Optional[dict]:
     return ckpt if isinstance(ckpt, dict) else {"model_state_dict": ckpt}
 
 
+def _resolve_mosei_thresholds(ckpt: Optional[dict]) -> tuple[dict[str, float], str]:
+    """
+    Per-class sigmoid cutoffs for MOSEI multi-label predictions.
+
+    Prefer ``val_calibrated_thresholds`` saved with ``--save_calibrated_ths``;
+    otherwise fall back to ``MOSEI_PREDICTION_THRESHOLD`` for every class.
+    """
+    fallback = {label: float(MOSEI_PREDICTION_THRESHOLD) for label in MOSEI_LABELS}
+    if ckpt is None:
+        return fallback, "default"
+
+    raw = ckpt.get("val_calibrated_thresholds")
+    if raw is None or len(raw) != len(MOSEI_LABELS):
+        return fallback, "default"
+
+    return (
+        {label: float(t) for label, t in zip(MOSEI_LABELS, raw)},
+        "calibrated",
+    )
+
+
 class EmotionDecoderWrapper:
     """
     Lazy-loaded wrapper for IEMOCAP and MOSEI fusion emotion-decoder models.
@@ -79,6 +100,10 @@ class EmotionDecoderWrapper:
         self._mosei_model: Optional[MoseiFusionWithEmotionDecoder] = None
         self._iemocap_weights_loaded = False
         self._mosei_weights_loaded = False
+        self._mosei_thresholds: dict[str, float] = {
+            label: float(MOSEI_PREDICTION_THRESHOLD) for label in MOSEI_LABELS
+        }
+        self._mosei_threshold_source: str = "default"
 
     @property
     def device(self) -> torch.device:
@@ -141,6 +166,10 @@ class EmotionDecoderWrapper:
             state = ckpt.get("model_state_dict", ckpt)
             model.load_state_dict(state)
             self._mosei_weights_loaded = True
+
+        self._mosei_thresholds, self._mosei_threshold_source = _resolve_mosei_thresholds(
+            ckpt
+        )
 
         model.eval()
         self._mosei_model = model
@@ -208,7 +237,7 @@ class EmotionDecoderWrapper:
         predicted = [
             label
             for label, prob in scores.items()
-            if prob >= MOSEI_PREDICTION_THRESHOLD
+            if prob >= self._mosei_thresholds[label]
         ]
 
         beta_mean = float(beta.detach().float().mean().cpu()) if beta is not None else None
@@ -223,7 +252,8 @@ class EmotionDecoderWrapper:
             placeholder_features=placeholder_features,
             meta={
                 "task": "multi_label_classification",
-                "threshold": MOSEI_PREDICTION_THRESHOLD,
+                "threshold_source": self._mosei_threshold_source,
+                "thresholds": dict(self._mosei_thresholds),
                 "beta_mean": beta_mean,
                 "audio_seq_len": int(audio_feats.hidden.size(1)),
                 "text_seq_len": int(text_feats.hidden.size(1)),
@@ -237,4 +267,6 @@ class EmotionDecoderWrapper:
             "iemocap_weights_loaded": self._iemocap_weights_loaded,
             "mosei_checkpoint": MOSEI_CHECKPOINT or None,
             "mosei_weights_loaded": self._mosei_weights_loaded,
+            "mosei_threshold_source": self._mosei_threshold_source,
+            "mosei_thresholds": dict(self._mosei_thresholds),
         }

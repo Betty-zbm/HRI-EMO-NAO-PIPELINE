@@ -167,12 +167,6 @@ class IemocapFeatureExtractor:
           1. Run WavLM feature extractor + forward pass.
           2. Downsample the FE attention mask to hidden-state length.
           3. Return fusion-decoder-ready tensors [1, T', 768].
-
-        Args:
-            wav_np: Mono float32 waveform, already padded/truncated for WavLM.
-
-        Returns:
-            SeqFeatures with ``hidden`` [1, T', 768] and ``key_padding_mask`` [1, T'].
         """
         self._load_wavlm()
 
@@ -209,7 +203,7 @@ class IemocapFeatureExtractor:
             text: Transcript string (Whisper output or placeholder).
 
         Returns:
-            SeqFeatures with ``hidden`` [1, L, 768] and ``key_padding_mask`` [1, L].
+            SeqFeatures with ``hidden`` [L, 768] and ``attention_mask`` [L].
         """
         self._load_bert()
         # Tokenize transcript into alphanumeric words (regex)

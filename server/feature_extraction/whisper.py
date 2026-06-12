@@ -1,26 +1,38 @@
 """
 Whisper speech-to-text for the online feature-extraction pipeline.
 
-Transcription runs before text feature encoding (BERT for IEMOCAP, word vectors
-for MOSEI). Expects mono float32 WAV at 16 kHz — use ``decode_wav_bytes`` on
-NAO upload bytes before calling ``transcribe``.
+Transcription runs before text feature encoding (BERT for IEMOCAP, GloVe for
+MOSEI). Expects mono float32 WAV at 16 kHz — use ``decode_wav_bytes`` on NAO
+upload bytes before calling ``transcribe``.
 """
 from __future__ import annotations
 
 import io
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import Optional, Union
 
 import librosa
 import numpy as np
 import soundfile as sf
 
-# NAO posts mono PCM WAV (16 kHz after client-side conversion in the test page).
-TARGET_SAMPLE_RATE = 16_000
-MAX_AUDIO_SECONDS = 10.0
+from server.config import MAX_AUDIO_SECONDS, TARGET_SAMPLE_RATE, WHISPER_MODEL_SIZE
 
-# Fixed Whisper settings (openai-whisper model size)
-# Options: tiny | base | small | medium | large
-WHISPER_MODEL_SIZE = "base"
+
+@dataclass
+class TimedWord:
+    """Single Whisper word token with second-level timestamps."""
+
+    word: str
+    start: float
+    end: float
+
+
+@dataclass
+class WhisperTranscript:
+    """Whisper output with optional word-level alignment."""
+
+    text: str
+    words: list[TimedWord] = field(default_factory=list)
 
 
 def decode_wav_bytes(
@@ -28,7 +40,7 @@ def decode_wav_bytes(
     *,
     filename_hint: str = "upload.wav",
     target_sr: int = TARGET_SAMPLE_RATE,
-    max_seconds: float = MAX_AUDIO_SECONDS,
+    max_seconds: float | None = MAX_AUDIO_SECONDS,
 ) -> tuple[np.ndarray, int]:
     """
     Decode NAO-uploaded WAV bytes into a mono float32 waveform for ASR / MOSEI.
@@ -37,13 +49,13 @@ def decode_wav_bytes(
       - mono mixdown
       - resample to ``target_sr`` when needed
       - peak normalize to [-1, 1]
-      - truncate to first ``max_seconds`` (no zero-padding)
+      - truncate to first ``max_seconds`` when set (no zero-padding)
 
     Args:
         data: Raw PCM WAV bytes from the /predict multipart upload.
         filename_hint: Original filename (used in error messages only).
         target_sr: Target sample rate (default 16 kHz).
-        max_seconds: Maximum clip duration to keep from the start.
+        max_seconds: Maximum clip duration to keep from the start. ``None`` keeps all.
 
     Returns:
         Tuple of (waveform, sample_rate).
@@ -71,9 +83,10 @@ def decode_wav_bytes(
     if peak > 0:
         wav = wav / peak
 
-    max_samples = int(target_sr * max_seconds)
-    if wav.shape[0] > max_samples:
-        wav = wav[:max_samples]
+    if max_seconds is not None:
+        max_samples = int(target_sr * max_seconds)
+        if wav.shape[0] > max_samples:
+            wav = wav[:max_samples]
 
     return wav.astype(np.float32), sr
 
@@ -89,7 +102,7 @@ class WhisperTranscriber:
     def __init__(
         self,
         *,
-        model_size: str = WHISPER_MODEL_SIZE,
+        model_size: str | None = None,
         device: Optional[str] = None,
     ):
         """
@@ -97,7 +110,7 @@ class WhisperTranscriber:
             model_size: Whisper checkpoint size (see ``WHISPER_MODEL_SIZE``).
             device: Torch device string. Auto-detected on first use when omitted.
         """
-        self.model_size = model_size
+        self.model_size = model_size or WHISPER_MODEL_SIZE
         self._device = device
         self._model = None
 
@@ -118,29 +131,64 @@ class WhisperTranscriber:
 
         self._model = whisper.load_model(self.model_size, device=self.device)
 
-    def transcribe(self, wav_np: np.ndarray, sample_rate: int = 16_000) -> str:
+    def transcribe(
+        self,
+        wav_np: np.ndarray,
+        sample_rate: int = TARGET_SAMPLE_RATE,
+        *,
+        word_timestamps: bool = False,
+    ) -> Union[str, WhisperTranscript]:
         """
-        Transcribe a mono waveform to plain text.
+        Transcribe a mono waveform.
 
-        Processing:
-          1. Lazy-load Whisper on first call.
-          2. Run ``model.transcribe`` with fp16 on GPU, language auto-detect.
-          3. Return stripped transcript (empty string when no speech detected).
+        When ``word_timestamps=False`` (IEMOCAP default), returns plain text.
+        When ``word_timestamps=True`` (MOSEI), returns ``WhisperTranscript``
+        with per-word ``start`` / ``end`` in seconds.
 
         Args:
-            wav_np: Mono float32 waveform. Must already be at 16 kHz
-                (``sample_rate`` is accepted for API compatibility but Whisper
-                assumes 16 kHz input).
-            sample_rate: Sample rate of ``wav_np`` (informational; resample
-                upstream if not 16 kHz).
+            wav_np: Mono float32 waveform at 16 kHz.
+            sample_rate: Informational; resample upstream if not 16 kHz.
+            word_timestamps: Enable Whisper word-level timestamps.
 
         Returns:
-            Transcript string, or ``""`` when Whisper returns no text.
+            Transcript string, or ``WhisperTranscript`` when timestamps requested.
         """
+        result = self._transcribe_raw(wav_np, word_timestamps=word_timestamps)
+        if word_timestamps:
+            return result
+        return result.text
+
+    def _transcribe_raw(
+        self,
+        wav_np: np.ndarray,
+        *,
+        word_timestamps: bool,
+    ) -> WhisperTranscript:
         self._ensure_loaded()
-        result = self._model.transcribe(
-            wav_np,
-            fp16=(self.device == "cuda"),
-            language=None,  # auto-detect
-        )
-        return (result.get("text") or "").strip()
+
+        kwargs: dict = {
+            "fp16": self.device == "cuda",
+            "language": None,  # auto-detect
+        }
+        if word_timestamps:
+            kwargs["word_timestamps"] = True
+
+        raw = self._model.transcribe(wav_np, **kwargs)
+        text = (raw.get("text") or "").strip()
+
+        words: list[TimedWord] = []
+        for segment in raw.get("segments") or []:
+            for item in segment.get("words") or []:
+                token = (item.get("word") or "").strip()
+                if not token:
+                    continue
+                words.append(
+                    TimedWord(
+                        word=token,
+                        start=float(item.get("start", 0.0)),
+                        end=float(item.get("end", 0.0)),
+                    )
+                )
+
+        words.sort(key=lambda w: (w.start, w.end))
+        return WhisperTranscript(text=text, words=words)

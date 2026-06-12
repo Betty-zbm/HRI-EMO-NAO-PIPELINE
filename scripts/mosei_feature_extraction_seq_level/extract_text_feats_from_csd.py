@@ -161,8 +161,9 @@ def main():
         "hidden_dim": dim,
         "num_segments": saved,
         "note": (
-            "MOSEI text seq-level features from CMU_MOSEI_TimestampedWordVectors, "
-            "aligned to labels at segment level. Uses only local CSDs."
+            "MOSEI text seq-level features from CMU_MOSEI_TimestampedWordVectors "
+            "(glove.840B.300d, 300-d), aligned to labels at segment level. "
+            "Uses only local CSDs."
         ),
     }
     (out_dir / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
