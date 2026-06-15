@@ -1,0 +1,3 @@
+# Deprecated: use requirements.txt instead.
+# Kept for backward compatibility.
+-r requirements.txt

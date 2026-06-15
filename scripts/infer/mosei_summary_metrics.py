@@ -5,10 +5,22 @@ import pandas as pd
 from pathlib import Path
 from sklearn.metrics import f1_score, roc_auc_score
 
+from server.config import MOSEI_CHECKPOINT, MOSEI_INFER_OUTPUT_DIR
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--infer_dir", type=str, required=True, help="Directory containing .npy outputs")
-    parser.add_argument("--ckpt", type=str, default=None, help="Path to best checkpoint (to load calibrated thresholds)")
+    parser.add_argument(
+        "--infer_dir",
+        type=str,
+        default=MOSEI_INFER_OUTPUT_DIR,
+        help="Directory containing .npy outputs",
+    )
+    parser.add_argument(
+        "--ckpt",
+        type=str,
+        default=MOSEI_CHECKPOINT,
+        help="Path to best checkpoint (to load calibrated thresholds)",
+    )
     parser.add_argument("--split", type=str, default="test", help="Which split to evaluate (val or test)")
     args = parser.parse_args()
 

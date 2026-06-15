@@ -85,7 +85,7 @@ async def predict(
       3. Online feature extraction (benchmark-specific)
       4. Fusion model inference
 
-    **benchmark**: ``iemocap`` (single-label, WavLM+BERT) or ``mosei`` (multi-label, placeholder features)
+    **benchmark**: ``iemocap`` (single-label, WavLM+BERT) or ``mosei`` (multi-label, COVAREP+GloVe)
     """
     benchmark = (benchmark or DEFAULT_BENCHMARK).strip().lower()
     if benchmark not in ("iemocap", "mosei"):

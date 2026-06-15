@@ -11,6 +11,7 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 
 from models.mosei_fusion_with_emotion_decoder import MoseiFusionWithEmotionDecoder
+from server.config import MOSEI_CHECKPOINT, MOSEI_INFER_OUTPUT_DIR
 
 EMO_COLS = ["emo_happy","emo_sad","emo_anger","emo_fear","emo_disgust","emo_surprise"]
 
@@ -285,12 +286,12 @@ def main():
     ap.add_argument("--text_dir",  default=None)
     ap.add_argument("--batch_size", type=int, default=8)          # 推理默认更小，稳妥
     ap.add_argument("--device", default="cuda")
-    ap.add_argument("--out_dir", default="outputs")
+    ap.add_argument("--out_dir", default=MOSEI_INFER_OUTPUT_DIR)
     ap.add_argument("--max_len_audio", type=int, default=300)     # 与训练一致
     ap.add_argument("--max_len_text",  type=int, default=128)     # 与训练一致
     ap.add_argument("--amp_dtype",     type=str, default="bf16", choices=["bf16","fp16","off"])
     # 模型（会被 ckpt['args'] 覆盖）
-    ap.add_argument("--ckpt", required=True)
+    ap.add_argument("--ckpt", default=MOSEI_CHECKPOINT)
     ap.add_argument("--d_model", type=int, default=384)
     ap.add_argument("--n_heads", type=int, default=6)
     ap.add_argument("--num_layers_fusion", type=int, default=2)

@@ -1,0 +1,51 @@
+# HRI-EMO unified dependencies
+# Install from repo root:
+#   python -m venv venv && source venv/bin/activate
+#   pip install -r requirements.txt
+#
+# Start server:
+#   uvicorn server.main:app --host 0.0.0.0 --port 8000
+# Dev reload (limit to server/ — do NOT use bare --reload, it watches venv/):
+#   uvicorn server.main:app --host 0.0.0.0 --port 8000 --reload --reload-dir server
+#
+# PyTorch: if you need CUDA, install the matching wheel first, e.g.:
+#   pip install -U torch torchaudio --index-url https://download.pytorch.org/whl/cu124
+# then run pip install -r requirements.txt (or skip torch/torchaudio lines below).
+#
+# Troubleshooting — "No module named '_lzma'" on macOS + pyenv:
+#   brew install xz
+#   LDFLAGS="-L$(brew --prefix xz)/lib" CPPFLAGS="-I$(brew --prefix xz)/include" \
+#     PKG_CONFIG_PATH="$(brew --prefix xz)/lib/pkgconfig" pyenv install 3.12.3 --force
+#   rm -rf venv && python -m venv venv && source venv/bin/activate && pip install -r requirements.txt
+
+# ---------------------------------------------------------------------------
+# Core ML (training, feature extraction, inference)
+# ---------------------------------------------------------------------------
+torch>=2.0
+torchaudio>=2.0
+transformers>=4.30
+numpy>=1.24
+pandas>=2.0
+scikit-learn>=1.3
+tqdm>=4.65
+
+# MOSEI offline CSD scripts need mmsdk, which is NOT on PyPI.
+# Only install if you run scripts/mosei_feature_extraction_seq_level/:
+#   pip install -r requirements-mosei-offline.txt
+
+# ---------------------------------------------------------------------------
+# Plotting / analysis tools
+# ---------------------------------------------------------------------------
+matplotlib>=3.7
+
+# ---------------------------------------------------------------------------
+# NAO server API (online pipeline: Whisper + feature extraction + FastAPI)
+# ---------------------------------------------------------------------------
+fastapi>=0.110
+uvicorn[standard]>=0.27
+python-multipart>=0.0.9
+openai-whisper>=20231117
+librosa>=0.10
+soundfile>=0.12
+scipy>=1.10
+gensim>=4.3

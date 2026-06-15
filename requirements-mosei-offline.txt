@@ -1,0 +1,24 @@
+# Optional: MOSEI offline CSD feature extraction
+# (scripts/mosei_feature_extraction_seq_level/*)
+#
+# NOT required for the NAO server API or download_mosei_validation_clips.py
+# (that script only needs: pip install h5py).
+#
+# Install from repo root:
+#   pip install "setuptools>=69,<81" wheel h5py validators requests
+#   pip install --no-build-isolation git+https://github.com/CMU-MultiComp-Lab/CMU-MultimodalSDK.git
+#
+# Or install everything except mmsdk first, then mmsdk with --no-build-isolation:
+#   pip install -r requirements-mosei-offline.txt
+#   pip install --no-build-isolation git+https://github.com/CMU-MultiComp-Lab/CMU-MultimodalSDK.git
+
+-r requirements.txt
+
+# CMU SDK setup.py imports pkg_resources; setuptools 82+ breaks isolated builds.
+setuptools>=69,<81
+wheel
+
+# mmsdk runtime dependencies
+h5py>=3.8
+validators>=0.20
+requests>=2.28

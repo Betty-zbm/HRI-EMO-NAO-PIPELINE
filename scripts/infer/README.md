@@ -26,21 +26,15 @@ You can also run the steps individually via terminal.
 *Exports predictions and attention maps. Note: `beta_hidden` must match training (64 for v2).*
 
 ```bash
-# 1. Setup path
-%cd /content/HRI-EMO
-
-# 2. Run Inferring (v2 Config)
-!PYTHONPATH=. python scripts/infer/mosei_eval_infer.py \
-  --ckpt /content/drive/MyDrive/ColabNotebooks/beta_decoder_project/HRI-EMO-results/mosei_fusion_decoder_v2/best_mosei_fusion_decoder.pt \
-  --index_csv_val ../data/mosei_index_splits.csv \
-  --index_csv_test ../data/mosei_index_splits.csv \
-  --features_root ../features/mosei/seq_level \
-  --out_dir /content/drive/MyDrive/ColabNotebooks/beta_decoder_project/HRI-EMO-results/mosei_fusion_decoder_v2/infer_outputs \
+# From repo root (checkpoint path defaults to server/config.py → checkpoints/mosei/)
+PYTHONPATH=. python scripts/infer/mosei_eval_infer.py \
+  --index_csv_val data/mosei_index_splits.csv \
+  --index_csv_test data/mosei_index_splits.csv \
+  --features_root features/mosei/seq_level \
   --batch_size 8 \
   --max_len_audio 300 \
   --max_len_text 128 \
   --amp_dtype fp16 \
-  --beta_hidden 64 \
   --dump_beta \
   --dump_attn \
   --attn_max_samples 100

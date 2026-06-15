@@ -40,3 +40,23 @@ server/
 ```
 
 NAO integration: see [nao_scripts/README.md](nao_scripts/README.md).
+
+## MOSEI online features (COVAREP + GloVe)
+
+Before using `benchmark=mosei`, configure `server/config.py`:
+
+| Variable | Description |
+|----------|-------------|
+| `COVAREP_ROOT` | Path to cloned [covarep/covarep](https://github.com/covarep/covarep) repo |
+| `COVAREP_RUNNER_BIN` | `matlab` or `octave` |
+| `GLOVE_MODEL_PATH` | Path to **`glove.840B.300d.txt`** ([Stanford GloVe](https://nlp.stanford.edu/projects/glove/)) |
+| `WHISPER_WORD_TIMESTAMPS` | `True` for MOSEI: order GloVe words by Whisper word timestamps |
+| `MOSEI_CHECKPOINT` | `checkpoints/mosei/best_mosei_fusion_decoder.pt` (set in `server/config.py`) |
+
+Validate extraction vs offline CSD (optional):
+
+```bash
+PYTHONPATH=. python scripts/validate_mosei_online_features.py --wav your_clip.wav
+```
+
+See [tools/covarep/README.md](../tools/covarep/README.md) for COVAREP setup.

@@ -5,11 +5,12 @@ import torch
 import matplotlib.pyplot as plt
 from sklearn.metrics import f1_score, average_precision_score, precision_recall_curve, roc_auc_score, roc_curve
 
+from server.config import MOSEI_CHECKPOINT, MOSEI_INFER_OUTPUT_DIR, MOSEI_PLOTS_DIR
+
 # ----------- Default Configuration ----------
-# Default values are written here, but command-line arguments are recommended
-DEFAULT_BASE_DIR = "/content/drive/MyDrive/ColabNotebooks/beta_decoder_project/HRI-EMO-results/mosei_fusion_decoder_v2/infer_outputs"
-DEFAULT_CKPT = "/content/drive/MyDrive/ColabNotebooks/beta_decoder_project/HRI-EMO-results/mosei_fusion_decoder_v2/best_mosei_fusion_decoder.pt"
-DEFAULT_OUT_DIR = "/content/drive/MyDrive/ColabNotebooks/beta_decoder_project/HRI-EMO-results/mosei_fusion_decoder_v2/plots"
+DEFAULT_BASE_DIR = MOSEI_INFER_OUTPUT_DIR
+DEFAULT_CKPT = MOSEI_CHECKPOINT
+DEFAULT_OUT_DIR = MOSEI_PLOTS_DIR
 
 EMO = ["Happy", "Sad", "Anger", "Fear", "Disgust", "Surprise"]
 COLORS = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b'] # Dedicated color palette

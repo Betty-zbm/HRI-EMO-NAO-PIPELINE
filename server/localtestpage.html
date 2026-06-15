@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>HRI-EMO API Self-Test</title>
+  <style>
+    :root {
+      --bg: #0f1419;
+      --card: #1a2332;
+      --text: #e7ecf3;
+      --muted: #8b9cb3;
+      --accent: #3b82f6;
+      --accent-hover: #2563eb;
+      --danger: #ef4444;
+      --success: #22c55e;
+      --border: #2d3a4f;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      padding: 2rem 1rem;
+    }
+    .container { max-width: 720px; margin: 0 auto; }
+    h1 { font-size: 1.5rem; margin-bottom: 0.25rem; }
+    .subtitle { color: var(--muted); margin-bottom: 1.5rem; font-size: 0.95rem; }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 1.25rem;
+      margin-bottom: 1rem;
+    }
+    label { display: block; font-size: 0.85rem; color: var(--muted); margin-bottom: 0.4rem; }
+    select {
+      width: 100%;
+      padding: 0.6rem 0.75rem;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: var(--bg);
+      color: var(--text);
+      font-size: 0.95rem;
+    }
+    .row { display: flex; gap: 0.75rem; flex-wrap: wrap; margin-top: 1rem; }
+    button {
+      flex: 1;
+      min-width: 140px;
+      padding: 0.75rem 1rem;
+      border: none;
+      border-radius: 8px;
+      font-size: 0.95rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    .btn-primary { background: var(--accent); color: white; }
+    .btn-primary:hover:not(:disabled) { background: var(--accent-hover); }
+    .btn-danger { background: var(--danger); color: white; }
+    .btn-secondary { background: var(--border); color: var(--text); }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .status {
+      margin-top: 1rem;
+      padding: 0.75rem;
+      border-radius: 8px;
+      background: var(--bg);
+      font-size: 0.9rem;
+      min-height: 2.5rem;
+    }
+    .status.recording { color: var(--danger); }
+    .status.ok { color: var(--success); }
+    .status.error { color: var(--danger); }
+    pre {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1rem;
+      overflow-x: auto;
+      font-size: 0.8rem;
+      line-height: 1.5;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .scores { display: grid; gap: 0.5rem; margin-top: 0.75rem; }
+    .score-row {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      font-size: 0.9rem;
+    }
+    .score-row span:first-child { width: 110px; }
+    .bar-wrap {
+      flex: 1;
+      height: 8px;
+      background: var(--bg);
+      border-radius: 4px;
+      overflow: hidden;
+    }
+    .bar { height: 100%; background: var(--accent); border-radius: 4px; transition: width 0.3s; }
+    .warning {
+      margin-top: 0.75rem;
+      padding: 0.6rem 0.75rem;
+      border-radius: 8px;
+      background: rgba(234, 179, 8, 0.15);
+      border: 1px solid rgba(234, 179, 8, 0.4);
+      color: #fbbf24;
+      font-size: 0.85rem;
+    }
+    audio { width: 100%; margin-top: 0.75rem; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>HRI-EMO Emotion API Self-Test</h1>
+    <p class="subtitle">Record audio, call <code>/predict</code>, and view emotion recognition results.</p>
+
+    <div class="card">
+      <label for="benchmark">Benchmark</label>
+      <select id="benchmark">
+        <option value="iemocap">IEMOCAP (single-label · WavLM + BERT)</option>
+        <option value="mosei">MOSEI (multi-label · COVAREP + GloVe)</option>
+      </select>
+
+      <div class="row">
+        <button id="btnRecord" class="btn-primary" type="button">Start recording</button>
+        <button id="btnStop" class="btn-danger" type="button" disabled>Stop</button>
+        <button id="btnSend" class="btn-secondary" type="button" disabled>Send to API</button>
+      </div>
+
+      <div id="status" class="status">Ready — click &quot;Start recording&quot;.</div>
+      <audio id="preview" controls style="display:none;"></audio>
+    </div>
+
+    <div class="card">
+      <h2 style="font-size: 1.1rem; margin-top: 0;">API response</h2>
+      <div id="warnings"></div>
+      <div id="summary"></div>
+      <div id="scores" class="scores"></div>
+      <pre id="rawJson">Waiting for request…</pre>
+    </div>
+  </div>
+
+  <script>
+    const benchmarkEl = document.getElementById("benchmark");
+    const btnRecord = document.getElementById("btnRecord");
+    const btnStop = document.getElementById("btnStop");
+    const btnSend = document.getElementById("btnSend");
+    const statusEl = document.getElementById("status");
+    const previewEl = document.getElementById("preview");
+    const rawJsonEl = document.getElementById("rawJson");
+    const summaryEl = document.getElementById("summary");
+    const scoresEl = document.getElementById("scores");
+    const warningsEl = document.getElementById("warnings");
+
+    let mediaRecorder = null;
+    let chunks = [];
+    let recordedBlob = null;
+
+    function setStatus(text, cls = "") {
+      statusEl.textContent = text;
+      statusEl.className = "status " + cls;
+    }
+
+    async function startRecording() {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        chunks = [];
+        mediaRecorder = new MediaRecorder(stream, { mimeType: getSupportedMimeType() });
+        mediaRecorder.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
+        mediaRecorder.onstop = async () => {
+          stream.getTracks().forEach((t) => t.stop());
+          try {
+            const rawBlob = new Blob(chunks, { type: mediaRecorder.mimeType });
+            recordedBlob = await blobToWav(rawBlob);
+            previewEl.src = URL.createObjectURL(recordedBlob);
+            previewEl.style.display = "block";
+            btnSend.disabled = false;
+            setStatus("Recording complete (converted to WAV) — click \"Send to API\".", "ok");
+          } catch (err) {
+            setStatus("Audio conversion failed: " + err.message, "error");
+          }
+        };
+        mediaRecorder.start();
+        btnRecord.disabled = true;
+        btnStop.disabled = false;
+        setStatus("Recording…", "recording");
+      } catch (err) {
+        setStatus("Microphone access denied: " + err.message, "error");
+      }
+    }
+
+    function getSupportedMimeType() {
+      const types = ["audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus", "audio/mp4"];
+      for (const t of types) {
+        if (MediaRecorder.isTypeSupported(t)) return t;
+      }
+      return "";
+    }
+
+    function writeString(view, offset, str) {
+      for (let i = 0; i < str.length; i++) {
+        view.setUint8(offset + i, str.charCodeAt(i));
+      }
+    }
+
+    function mixToMono(buffer) {
+      const len = buffer.length;
+      const mono = new Float32Array(len);
+      const channels = buffer.numberOfChannels;
+      for (let ch = 0; ch < channels; ch++) {
+        const data = buffer.getChannelData(ch);
+        for (let i = 0; i < len; i++) mono[i] += data[i] / channels;
+      }
+      return mono;
+    }
+
+    function encodeWav(samples, sampleRate) {
+      const buffer = new ArrayBuffer(44 + samples.length * 2);
+      const view = new DataView(buffer);
+      writeString(view, 0, "RIFF");
+      view.setUint32(4, 36 + samples.length * 2, true);
+      writeString(view, 8, "WAVE");
+      writeString(view, 12, "fmt ");
+      view.setUint32(16, 16, true);
+      view.setUint16(20, 1, true);
+      view.setUint16(22, 1, true);
+      view.setUint32(24, sampleRate, true);
+      view.setUint32(28, sampleRate * 2, true);
+      view.setUint16(32, 2, true);
+      view.setUint16(34, 16, true);
+      writeString(view, 36, "data");
+      view.setUint32(40, samples.length * 2, true);
+      let offset = 44;
+      for (let i = 0; i < samples.length; i++, offset += 2) {
+        const s = Math.max(-1, Math.min(1, samples[i]));
+        view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+      }
+      return new Blob([buffer], { type: "audio/wav" });
+    }
+
+    async function blobToWav(blob) {
+      const arrayBuffer = await blob.arrayBuffer();
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      const decodeContext = new AudioCtx();
+      const audioBuffer = await decodeContext.decodeAudioData(arrayBuffer);
+      await decodeContext.close();
+
+      const targetRate = 16000;
+      let rendered = audioBuffer;
+      if (audioBuffer.sampleRate !== targetRate) {
+        const offline = new OfflineAudioContext(
+          1,
+          Math.ceil(audioBuffer.duration * targetRate),
+          targetRate
+        );
+        const source = offline.createBufferSource();
+        source.buffer = audioBuffer;
+        source.connect(offline.destination);
+        source.start(0);
+        rendered = await offline.startRendering();
+      }
+
+      const mono = rendered.numberOfChannels === 1
+        ? rendered.getChannelData(0)
+        : mixToMono(rendered);
+      return encodeWav(mono, targetRate);
+    }
+
+    function stopRecording() {
+      if (mediaRecorder && mediaRecorder.state !== "inactive") {
+        mediaRecorder.stop();
+      }
+      btnRecord.disabled = false;
+      btnStop.disabled = true;
+    }
+
+    async function sendAudio(blob, filename) {
+      setStatus("Calling API…", "");
+      btnSend.disabled = true;
+
+      const form = new FormData();
+      form.append("audio", blob, filename);
+      form.append("benchmark", benchmarkEl.value);
+
+      try {
+        const resp = await fetch("/predict", { method: "POST", body: form });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.detail || resp.statusText);
+        renderResult(data);
+        setStatus("Request succeeded.", "ok");
+      } catch (err) {
+        setStatus("Request failed: " + err.message, "error");
+        rawJsonEl.textContent = err.message;
+      } finally {
+        btnSend.disabled = !recordedBlob;
+      }
+    }
+
+    function renderResult(data) {
+      rawJsonEl.textContent = JSON.stringify(data, null, 2);
+
+      warningsEl.innerHTML = "";
+      if (data.warning) {
+        warningsEl.innerHTML += `<div class="warning">${data.warning}</div>`;
+      }
+      if (data.warning_features) {
+        warningsEl.innerHTML += `<div class="warning">${data.warning_features}</div>`;
+      }
+
+      const predicted = (data.predicted || []).join(", ") || "(none)";
+      summaryEl.innerHTML = `
+        <p><strong>Transcript:</strong> ${escapeHtml(data.transcript || "")}</p>
+        <p><strong>Predicted:</strong> ${escapeHtml(predicted)}</p>
+        <p><strong>Benchmark:</strong> ${escapeHtml(data.benchmark || "")}
+           · Weights loaded: ${data.weights_loaded ? "yes" : "no"}</p>
+      `;
+
+      scoresEl.innerHTML = "";
+      const scores = data.scores || {};
+      const maxScore = Math.max(...Object.values(scores), 0.01);
+      for (const [label, score] of Object.entries(scores)) {
+        const pct = (score / maxScore) * 100;
+        scoresEl.innerHTML += `
+          <div class="score-row">
+            <span>${escapeHtml(label)}</span>
+            <div class="bar-wrap"><div class="bar" style="width:${pct}%"></div></div>
+            <span>${(score * 100).toFixed(1)}%</span>
+          </div>`;
+      }
+    }
+
+    function escapeHtml(s) {
+      const d = document.createElement("div");
+      d.textContent = s;
+      return d.innerHTML;
+    }
+
+    btnRecord.addEventListener("click", startRecording);
+    btnStop.addEventListener("click", stopRecording);
+    btnSend.addEventListener("click", () => {
+      if (recordedBlob) sendAudio(recordedBlob, "recording.wav");
+    });
+  </script>
+</body>
+</html>

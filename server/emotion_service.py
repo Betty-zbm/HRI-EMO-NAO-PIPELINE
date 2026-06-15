@@ -1,10 +1,10 @@
-"""Application service: orchestrates emotion recognition for the NAO API."""
+"""End-to-end emotion recognition pipeline for the NAO server API."""
 from __future__ import annotations
 
 from dataclasses import asdict
 from typing import Any, Literal
 
-from server.config import DEFAULT_BENCHMARK
+from server.config import DEFAULT_BENCHMARK, WHISPER_WORD_TIMESTAMPS
 from server.feature_extraction import (
     IemocapFeatureExtractor,
     MoseiFeatureExtractor,
@@ -13,6 +13,7 @@ from server.feature_extraction import (
 from server.feature_extraction.whisper import (
     MAX_AUDIO_SECONDS,
     WHISPER_MODEL_SIZE,
+    WhisperTranscript,
     decode_wav_bytes,
 )
 from server.emotion_inference import EmotionDecoderWrapper, EmotionPrediction
@@ -46,11 +47,10 @@ class EmotionService:
 
         wav_np, sr = decode_wav_bytes(audio_bytes, filename_hint=filename_hint)
 
-        transcript = self.transcriber.transcribe(wav_np, sample_rate=sr)
-        if not transcript:
-            transcript = "<empty>"
-
         if benchmark == "iemocap":
+            transcript = self.transcriber.transcribe(wav_np, sample_rate=sr)
+            if not transcript:
+                transcript = "<empty>"
             audio_feats, text_feats = self.iemocap_features.extract(wav_np, transcript)
             prediction = self.decoder.predict_iemocap(
                 audio_feats,
@@ -58,12 +58,25 @@ class EmotionService:
                 transcript=transcript,
             )
         else:
-            audio_feats, text_feats = self.mosei_features.extract(wav_np, transcript)
+            asr = self.transcriber.transcribe(
+                wav_np,
+                sample_rate=sr,
+                word_timestamps=WHISPER_WORD_TIMESTAMPS,
+            )
+            if isinstance(asr, WhisperTranscript):
+                transcript = asr.text or "<empty>"
+                if not asr.text:
+                    asr = WhisperTranscript(text=transcript, words=[])
+            else:
+                transcript = asr or "<empty>"
+                asr = WhisperTranscript(text=transcript, words=[])
+
+            audio_feats, text_feats = self.mosei_features.extract(wav_np, asr)
             prediction = self.decoder.predict_mosei(
                 audio_feats,
                 text_feats,
                 transcript=transcript,
-                placeholder_features=MoseiFeatureExtractor.PLACEHOLDER,
+                placeholder_features=False,
             )
 
         return self._format_response(
@@ -92,21 +105,18 @@ class EmotionService:
                 "weights and are NOT meaningful. Set checkpoint path in server/config.py."
             )
 
-        if prediction.placeholder_features:
-            payload["warning_features"] = (
-                "MOSEI features use a placeholder online extractor (not COVAREP / "
-                "TimestampedWordVectors). Replace before production inference."
-            )
-
         return payload
 
     def health(self) -> dict[str, Any]:
+        mosei_status = self.mosei_features.status()
         return {
             "status": "ok",
             "benchmarks": ["iemocap", "mosei"],
             "default_benchmark": DEFAULT_BENCHMARK,
             "emotion_decoder": self.decoder.status(),
             "whisper_model": WHISPER_MODEL_SIZE,
-            "mosei_feature_mode": "placeholder",
+            "whisper_word_timestamps": WHISPER_WORD_TIMESTAMPS,
+            "mosei_feature_mode": mosei_status.get("mode", "unknown"),
+            "mosei_features": mosei_status,
             "iemocap_feature_mode": "wavlm+bert (matches offline scripts)",
         }

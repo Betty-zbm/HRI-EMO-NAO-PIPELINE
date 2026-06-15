@@ -109,7 +109,7 @@ def parse_args():
     ap.add_argument("--num_workers", type=int, default=2, help="DataLoader workers")
 
     # Misc
-    ap.add_argument("--out_dir", type=str, default="runs/mosei_fusion_decoder")
+    ap.add_argument("--out_dir", type=str, default="checkpoints/mosei")
     ap.add_argument("--seed", type=int, default=1234)
     ap.add_argument("--max_train_samples", type=int, default=None)
 
