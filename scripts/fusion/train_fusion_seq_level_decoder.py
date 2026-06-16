@@ -27,9 +27,11 @@ import pandas as pd
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
+from torch.amp import autocast, GradScaler
 from tqdm import tqdm
 
 from models.fusion_with_emotion_decoder import FusionWithEmotionDecoder
+from models.mosei_fusion_with_emotion_decoder import MoseiFusionWithEmotionDecoder
 
 
 # ---------------------------------------------------------------
@@ -81,6 +83,16 @@ def parse_args():
     ap.add_argument("--epochs", type=int, default=15)
     ap.add_argument("--lr", type=float, default=1e-4)
     ap.add_argument("--weight_decay", type=float, default=1e-2)
+    ap.add_argument("--grad_accum", type=int, default=1,
+                    help="gradient accumulation steps (MOSEI v2: 2)")
+    ap.add_argument("--warmup_ratio", type=float, default=0.0,
+                    help="fraction of total train steps for LR warmup (MOSEI v2: 0.1)")
+    ap.add_argument("--beta_entropy", type=float, default=0.0,
+                    help="beta entropy regularizer weight (MOSEI v2: 1e-3)")
+    ap.add_argument("--max_len_audio", type=int, default=None,
+                    help="truncate audio sequence length (MOSEI v2: 300)")
+    ap.add_argument("--max_len_text", type=int, default=None,
+                    help="truncate text sequence length (MOSEI v2: 128)")
 
     # Logging / saving
     ap.add_argument("--out_dir", type=str, default="runs/fusion_seq_level_decoder")
@@ -113,6 +125,8 @@ class SeqLevelFusionDataset(Dataset):
         label_col: str,
         label2id: Dict[str, int],
         loss_type: str = "single_label",
+        max_len_audio: int | None = None,
+        max_len_text: int | None = None,
     ):
         self.df = df.reset_index(drop=True)
         self.audio_dir = audio_dir
@@ -121,6 +135,8 @@ class SeqLevelFusionDataset(Dataset):
         self.label_col = label_col
         self.label2id = label2id
         self.loss_type = loss_type
+        self.max_len_audio = max_len_audio
+        self.max_len_text = max_len_text
 
         keep_indices: List[int] = []
         for i, row in self.df.iterrows():
@@ -179,6 +195,10 @@ class SeqLevelFusionDataset(Dataset):
 
         h_a, m_a = self._load_seq_feat(a_path)
         h_t, m_t = self._load_seq_feat(t_path)
+        if self.max_len_audio is not None and h_a.size(0) > self.max_len_audio:
+            h_a, m_a = h_a[: self.max_len_audio], m_a[: self.max_len_audio]
+        if self.max_len_text is not None and h_t.size(0) > self.max_len_text:
+            h_t, m_t = h_t[: self.max_len_text], m_t[: self.max_len_text]
 
         if self.loss_type == "single_label":
             label = self._encode_label_single(label_str)
@@ -261,6 +281,8 @@ def get_dataloaders(args):
         label_col=args.label_col,
         label2id=label2id,
         loss_type=args.loss_type,
+        max_len_audio=args.max_len_audio,
+        max_len_text=args.max_len_text,
     )
     val_ds = SeqLevelFusionDataset(
         val_df,
@@ -270,13 +292,15 @@ def get_dataloaders(args):
         label_col=args.label_col,
         label2id=label2id,
         loss_type=args.loss_type,
+        max_len_audio=args.max_len_audio,
+        max_len_text=args.max_len_text,
     )
 
     train_loader = DataLoader(
         train_ds,
         batch_size=args.batch_size,
         shuffle=True,
-        num_workers=4,
+        num_workers=0,
         pin_memory=True,
         collate_fn=lambda b: collate_seq_batch(b, args.loss_type),
     )
@@ -285,7 +309,7 @@ def get_dataloaders(args):
         val_ds,
         batch_size=args.batch_size,
         shuffle=False,
-        num_workers=4,
+        num_workers=0,
         pin_memory=True,
         collate_fn=lambda b: collate_seq_batch(b, args.loss_type),
     )
@@ -297,41 +321,64 @@ def get_dataloaders(args):
 # Training / Evaluation
 # ---------------------------------------------------------------
 
-def train_one_epoch(model, loader, criterion, device, loss_type: str):
+def beta_entropy_loss(beta: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+    b = torch.clamp(beta, eps, 1.0 - eps)
+    ent = -(b * torch.log(b) + (1 - b) * torch.log(1 - b))
+    return ent.mean()
+
+
+def _batch_metrics(logits, labels, loss_type: str):
+    if loss_type == "single_label":
+        preds = logits.argmax(dim=-1)
+        correct = (preds == labels).sum().item()
+    else:
+        preds = (torch.sigmoid(logits) > 0.5).float()
+        correct = ((preds == labels).all(dim=-1)).sum().item()
+    return correct, labels.size(0)
+
+
+def _compute_loss(logits, labels, beta, criterion, loss_type: str, beta_entropy: float):
+    loss = criterion(logits, labels)
+    if beta is not None and beta_entropy > 0:
+        loss = loss + beta_entropy * beta_entropy_loss(beta)
+    return loss
+
+
+def train_one_epoch(model, loader, optimizer, scheduler, criterion, device, scaler, args):
     model.train()
     total_loss, correct, total = 0.0, 0, 0
     all_beta = []
+    optimizer.zero_grad(set_to_none=True)
 
-    for h_a, m_a, h_t, m_t, labels in tqdm(loader, desc="Train", leave=False):
+    for step, (h_a, m_a, h_t, m_t, labels) in enumerate(tqdm(loader, desc="Train", leave=False)):
         h_a, m_a = h_a.to(device), m_a.to(device)
         h_t, m_t = h_t.to(device), m_t.to(device)
         labels = labels.to(device)
 
-        logits, beta, _ = model(h_a, h_t, m_a, m_t)
+        with autocast("cuda", enabled=(device.type == "cuda")):
+            logits, beta, _ = model(h_a, h_t, m_a, m_t)
+            raw_loss = _compute_loss(
+                logits, labels, beta, criterion, args.loss_type, args.beta_entropy
+            )
+            loss = raw_loss / args.grad_accum
 
-        if loss_type == "single_label":
-            loss = criterion(logits, labels)
-            preds = logits.argmax(dim=-1)
-            correct += (preds == labels).sum().item()
-            total += labels.size(0)
-        else:
-            loss = criterion(logits, labels)
-            preds = (torch.sigmoid(logits) > 0.5).float()
-            # simple multi-label accuracy: all labels match
-            correct += ((preds == labels).all(dim=-1)).sum().item()
-            total += labels.size(0)
+        scaler.scale(loss).backward()
+        if (step + 1) % args.grad_accum == 0:
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad(set_to_none=True)
+            if scheduler is not None:
+                scheduler.step()
 
-        # (optional) encourage non-degenerate beta: small regularizer
-        beta_reg = (beta * (1 - beta)).mean()
-        loss = loss - 0.01 * beta_reg
-
-        total_loss += loss.item() * labels.size(0)
-        all_beta.extend(beta.detach().cpu().view(-1).tolist())
-
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
-        model.optimizer.step()
-        model.optimizer.zero_grad()
+        bs = labels.size(0)
+        total_loss += raw_loss.detach().float().item() * bs
+        batch_correct, batch_total = _batch_metrics(logits.detach(), labels, args.loss_type)
+        correct += batch_correct
+        total += batch_total
+        if beta is not None:
+            all_beta.extend(beta.detach().float().cpu().view(-1).tolist())
 
     avg_loss = total_loss / total if total > 0 else 0.0
     acc = correct / total if total > 0 else 0.0
@@ -340,7 +387,7 @@ def train_one_epoch(model, loader, criterion, device, loss_type: str):
 
 
 @torch.no_grad()
-def evaluate(model, loader, criterion, device, loss_type: str):
+def evaluate(model, loader, criterion, device, args):
     model.eval()
     total_loss, correct, total = 0.0, 0, 0
     all_beta = []
@@ -350,26 +397,46 @@ def evaluate(model, loader, criterion, device, loss_type: str):
         h_t, m_t = h_t.to(device), m_t.to(device)
         labels = labels.to(device)
 
-        logits, beta, _ = model(h_a, h_t, m_a, m_t)
+        with autocast("cuda", enabled=(device.type == "cuda")):
+            logits, beta, _ = model(h_a, h_t, m_a, m_t)
+            raw_loss = _compute_loss(
+                logits, labels, beta, criterion, args.loss_type, args.beta_entropy
+            )
 
-        if loss_type == "single_label":
-            loss = criterion(logits, labels)
-            preds = logits.argmax(dim=-1)
-            correct += (preds == labels).sum().item()
-            total += labels.size(0)
-        else:
-            loss = criterion(logits, labels)
-            preds = (torch.sigmoid(logits) > 0.5).float()
-            correct += ((preds == labels).all(dim=-1)).sum().item()
-            total += labels.size(0)
-
-        total_loss += loss.item() * labels.size(0)
-        all_beta.extend(beta.detach().cpu().view(-1).tolist())
+        bs = labels.size(0)
+        total_loss += raw_loss.item() * bs
+        batch_correct, batch_total = _batch_metrics(logits, labels, args.loss_type)
+        correct += batch_correct
+        total += batch_total
+        if beta is not None:
+            all_beta.extend(beta.detach().float().cpu().view(-1).tolist())
 
     avg_loss = total_loss / total if total > 0 else 0.0
     acc = correct / total if total > 0 else 0.0
     mean_beta = float(np.mean(all_beta)) if all_beta else 0.0
     return avg_loss, acc, mean_beta
+
+
+def _read_feat_dim(feat_dir: Path) -> int:
+    meta = json.loads((feat_dir / "meta.json").read_text(encoding="utf-8"))
+    return int(meta.get("hidden_dim", meta.get("dim", 768)))
+
+
+def build_model(args, num_emotions: int, d_audio: int, d_text: int, device):
+    common = dict(
+        num_emotions=num_emotions,
+        n_heads=args.n_heads,
+        num_layers_fusion=args.num_layers_fusion,
+        num_layers_decoder=args.num_layers_decoder,
+        beta_hidden=args.beta_hidden,
+        dropout=args.dropout,
+    )
+    if args.d_model != d_audio or args.d_model != d_text:
+        print(f"[Model] v2 projection: audio={d_audio}, text={d_text} -> d_model={args.d_model}")
+        return MoseiFusionWithEmotionDecoder(
+            d_audio=d_audio, d_text=d_text, d_model=args.d_model, **common
+        ).to(device)
+    return FusionWithEmotionDecoder(d_model=args.d_model, **common).to(device)
 
 
 # ---------------------------------------------------------------
@@ -387,33 +454,35 @@ def main():
 
     train_loader, val_loader, label2id = get_dataloaders(args)
     num_emotions = len(label2id)
+    d_audio = _read_feat_dim(Path(args.audio_dir))
+    d_text = _read_feat_dim(Path(args.text_dir))
 
     print(f"[Info] num_emotions = {num_emotions}")
 
-    # Build model
-    model = FusionWithEmotionDecoder(
-        d_model=args.d_model,
-        num_emotions=num_emotions,
-        n_heads=args.n_heads,
-        num_layers_fusion=args.num_layers_fusion,
-        num_layers_decoder=args.num_layers_decoder,
-        beta_hidden=args.beta_hidden,
-        dropout=args.dropout,
-    ).to(device)
-
-    # Attach optimizer to model (used inside train_one_epoch)
+    model = build_model(args, num_emotions, d_audio, d_text, device)
     optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=args.lr,
-        weight_decay=args.weight_decay,
+        model.parameters(), lr=args.lr, weight_decay=args.weight_decay
     )
-    model.optimizer = optimizer
+    scaler = GradScaler("cuda", enabled=(device.type == "cuda"))
 
-    # Loss
     if args.loss_type == "single_label":
         criterion = nn.CrossEntropyLoss()
     else:
         criterion = nn.BCEWithLogitsLoss()
+
+    scheduler = None
+    if args.warmup_ratio > 0:
+        total_steps = (len(train_loader) * args.epochs) // max(1, args.grad_accum)
+        warmup_steps = int(args.warmup_ratio * total_steps)
+
+        def lr_lambda(step: int):
+            if step < warmup_steps:
+                return float(step) / float(max(1, warmup_steps))
+            progress = float(step - warmup_steps) / float(max(1, total_steps - warmup_steps))
+            return 0.5 * (1.0 + np.cos(np.pi * min(1.0, max(0.0, progress))))
+
+        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+        print(f"[Scheduler] cosine+warmup: total_steps={total_steps}, warmup_steps={warmup_steps}")
 
     best_val_acc = 0.0
     best_state = None
@@ -422,15 +491,15 @@ def main():
         print(f"\n=== Epoch {epoch}/{args.epochs} ===")
 
         train_loss, train_acc, train_beta = train_one_epoch(
-            model, train_loader, criterion, device, args.loss_type
+            model, train_loader, optimizer, scheduler, criterion, device, scaler, args
         )
         val_loss, val_acc, val_beta = evaluate(
-            model, val_loader, criterion, device, args.loss_type
+            model, val_loader, criterion, device, args
         )
 
         print(
-            f"Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.4f} | Mean β: {train_beta:.3f}  "
-            f"||  Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.4f} | Mean β: {val_beta:.3f}"
+            f"Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.4f} | Mean beta: {train_beta:.3f}  "
+            f"||  Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.4f} | Mean beta: {val_beta:.3f}"
         )
 
         if val_acc > best_val_acc:

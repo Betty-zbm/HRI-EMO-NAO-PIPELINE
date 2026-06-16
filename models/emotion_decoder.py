@@ -88,7 +88,7 @@ class EmotionDecoder(nn.Module):
         num_emotions: int = 4,
         n_heads: int = 8,
         num_layers: int = 2,
-        dim_feedforward: int = 2048,
+        dim_feedforward: int = None,
         dropout: float = 0.1,
         use_output_layer: bool = True,
     ):
@@ -97,12 +97,14 @@ class EmotionDecoder(nn.Module):
         self.num_emotions = num_emotions
         self.use_output_layer = use_output_layer
 
+        if dim_feedforward is None:
+            dim_feedforward = 2048
+
         # Learnable emotion queries: [num_emotions, d]
         self.emotion_queries = nn.Parameter(
             torch.randn(num_emotions, d_model)
         )
 
-        # 替换原本的 nn.TransformerDecoder，改用我们要手写的 ModuleList
         self.layers = nn.ModuleList([
             ExplainableDecoderLayer(d_model, n_heads, dim_feedforward, dropout)
             for _ in range(num_layers)
