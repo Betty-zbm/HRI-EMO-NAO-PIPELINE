@@ -65,7 +65,7 @@ class CovarepRunner:
                 )
             exe = Path(found).resolve()
 
-        name = exe.name.lower()
+        name = exe.stem.lower()
         if name == "matlab":
             kind = "matlab"
         elif name == "octave":

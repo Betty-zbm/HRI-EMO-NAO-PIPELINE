@@ -84,6 +84,8 @@ def parse_args():
                     choices=["single_label", "multi_label"])
     ap.add_argument("--label_smoothing",  type=float, default=0.0,
                     help="Label smoothing for CrossEntropyLoss (0 = off).")
+    ap.add_argument("--class_weights",    action="store_true",
+                    help="Inverse-frequency class weights for CrossEntropyLoss (train split).")
 
     # Training (v2 defaults)
     ap.add_argument("--batch_size",    type=int,   default=16)
@@ -257,6 +259,18 @@ def apply_label_transforms(df: pd.DataFrame, label_col: str,
     return df
 
 
+def compute_class_weights(train_df: pd.DataFrame, label_col: str,
+                          label2id: Dict[str, int]) -> torch.Tensor:
+    counts = train_df[label_col].value_counts()
+    n = len(train_df)
+    num_classes = len(label2id)
+    weights = torch.ones(num_classes, dtype=torch.float32)
+    for label, idx in label2id.items():
+        c = int(counts.get(label, 0))
+        weights[idx] = n / (num_classes * max(c, 1))
+    return weights
+
+
 def get_dataloaders(args):
     df       = pd.read_csv(args.csv)
     df       = apply_label_transforms(df, args.label_col,
@@ -266,6 +280,9 @@ def get_dataloaders(args):
 
     train_df = df[df[args.split_col] == args.train_split_name]
     val_df   = df[df[args.split_col] == args.val_split_name]
+
+    class_weights = (compute_class_weights(train_df, args.label_col, label2id)
+                      if args.class_weights else None)
 
     kw = dict(uid_col=args.uid_col, label_col=args.label_col, label2id=label2id,
               loss_type=args.loss_type,
@@ -278,7 +295,7 @@ def get_dataloaders(args):
                               num_workers=0, pin_memory=True, collate_fn=cf)
     val_loader   = DataLoader(val_ds,   batch_size=args.batch_size, shuffle=False,
                               num_workers=0, pin_memory=True, collate_fn=cf)
-    return train_loader, val_loader, label2id
+    return train_loader, val_loader, label2id, class_weights
 
 
 def _read_feat_dim(feat_dir: Path) -> int:
@@ -417,7 +434,7 @@ def main():
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    train_loader, val_loader, label2id = get_dataloaders(args)
+    train_loader, val_loader, label2id, class_weights = get_dataloaders(args)
     id2label     = {v: k for k, v in label2id.items()}
     num_emotions = len(label2id)
     d_audio = _read_feat_dim(Path(args.audio_dir))
@@ -425,12 +442,15 @@ def main():
 
     print(f"[Info] num_emotions={num_emotions}  d_audio={d_audio}  d_text={d_text}  device={device}")
     print(f"[v3]  feat_mask_prob={args.feat_mask_prob}  rdrop_alpha={args.rdrop_alpha}")
+    if class_weights is not None:
+        print(f"[Loss] class_weights: {dict(zip([id2label[i] for i in range(num_emotions)], class_weights.tolist()))}")
 
     model     = build_model(args, num_emotions, d_audio, d_text, device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr,
                                   weight_decay=args.weight_decay)
     scaler    = GradScaler("cuda", enabled=(device.type == "cuda"))
-    criterion = (nn.CrossEntropyLoss(label_smoothing=args.label_smoothing)
+    cw = class_weights.to(device) if class_weights is not None else None
+    criterion = (nn.CrossEntropyLoss(weight=cw, label_smoothing=args.label_smoothing)
                  if args.loss_type == "single_label" else nn.BCEWithLogitsLoss())
 
     total_steps  = (len(train_loader) * args.epochs) // max(1, args.grad_accum)

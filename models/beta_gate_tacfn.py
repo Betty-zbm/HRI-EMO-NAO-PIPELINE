@@ -94,20 +94,16 @@ class BetaGate(nn.Module):
         # scalar beta for logging / interpretability
         beta_scalar = w.mean(dim=-1, keepdim=True)  # [B, 1]
 
-        # 5) choose fusion length
+        # 5) choose fusion length (align to text length, padding or truncating audio)
         L_a = h_a_n.size(1)
         L_t = h_t_n.size(1)
-        if L_a == L_t:
-            L = L_a
-        else:
-            # simple & consistent: align to text length
-            L = L_t
+        L = L_t
 
-        # align sequences
-        if L_a != L:
+        if L_a > L:
             h_a_n = h_a_n[:, :L, :]
-        if L_t != L:
-            h_t_n = h_t_n[:, :L, :]
+        elif L_a < L:
+            pad = torch.zeros(B, L - L_a, d, dtype=h_a_n.dtype, device=h_a_n.device)
+            h_a_n = torch.cat([h_a_n, pad], dim=1)
 
         # 6) broadcast gate to sequence
         w_b = w.view(B, 1, d).expand(B, L, d)  # [B, L, d]

@@ -1,94 +1,60 @@
-"""Server configuration."""
-from __future__ import annotations
-
+"""
+Server configuration for the online emotion recognition pipeline.
+All paths are relative to the project root (one level above server/).
+"""
 from pathlib import Path
 
-# Repo root (parent of server/)
 ROOT_DIR = Path(__file__).resolve().parent.parent
 
-# ---------------------------------------------------------------------------
-# Model checkpoints (under repo-root checkpoints/)
-# ---------------------------------------------------------------------------
-CHECKPOINTS_DIR = ROOT_DIR / "checkpoints"
-MOSEI_CHECKPOINT_DIR = CHECKPOINTS_DIR / "mosei"
-MOSEI_CHECKPOINT: str = str(MOSEI_CHECKPOINT_DIR / "best_mosei_fusion_decoder.pt")
-MOSEI_INFER_OUTPUT_DIR: str = str(MOSEI_CHECKPOINT_DIR / "infer_outputs")
-MOSEI_PLOTS_DIR: str = str(MOSEI_CHECKPOINT_DIR / "plots")
+# ─── Audio decoding ────────────────────────────────────────────────────────────
+TARGET_SAMPLE_RATE = 16_000
+MAX_AUDIO_SECONDS = 10.0
 
-IEMOCAP_CHECKPOINT_DIR = CHECKPOINTS_DIR / "iemocap"
-IEMOCAP_CHECKPOINT: str = ""  # e.g. str(IEMOCAP_CHECKPOINT_DIR / "best_fusion_seq_decoder.pt")
+# ─── Whisper ASR ───────────────────────────────────────────────────────────────
+WHISPER_MODEL_SIZE = "base"   # tiny / base / small / medium / large
 
-# Default benchmark for /predict when not specified
-DEFAULT_BENCHMARK: str = "iemocap"
+# ─── IEMOCAP 4-class ───────────────────────────────────────────────────────────
+# Best single-model checkpoint (seed=7777, WA=68.91% on val)
+IEMOCAP_CHECKPOINT = str(
+    ROOT_DIR / "runs" / "iemocap_4cls_seed7777" / "best_fusion_seq_decoder.pt"
+)
+# Label order must match label2id stored in the checkpoint (alphabetical)
+IEMOCAP_LABELS = ["angry", "happy", "neutral", "sad"]
 
-# ---------------------------------------------------------------------------
-# Shared audio preprocessing
-# ---------------------------------------------------------------------------
-TARGET_SAMPLE_RATE: int = 16_000
-MAX_AUDIO_SECONDS: float = 10.0
+# Model hyperparameters (overridden by checkpoint["args"] if present)
+IEMOCAP_D_MODEL          = 256
+IEMOCAP_N_HEADS          = 4
+IEMOCAP_NUM_LAYERS_FUSION  = 1
+IEMOCAP_NUM_LAYERS_DECODER = 2
+IEMOCAP_BETA_HIDDEN      = 128
+IEMOCAP_DROPOUT          = 0.1
+# Sequence-length caps matching training (300 audio frames, 128 text tokens)
+IEMOCAP_MAX_LEN_AUDIO    = 300
+IEMOCAP_MAX_LEN_TEXT     = 128
 
-# Whisper ASR (openai-whisper)
-WHISPER_MODEL_SIZE: str = "base"  # tiny | base | small | medium | large
-# MOSEI text features: use Whisper word-level timestamps before GloVe lookup
-WHISPER_WORD_TIMESTAMPS: bool = True
+# ─── MOSEI 6-class multi-label ─────────────────────────────────────────────────
+MOSEI_CHECKPOINT = str(
+    ROOT_DIR / "runs" / "mosei_fusion_decoder_v2" / "best_fusion_seq_decoder.pt"
+)
+MOSEI_LABELS = ["angry", "disgust", "fear", "happy", "sad", "surprise"]
+MOSEI_AUDIO_DIM            = 74    # COVAREP dimension
+MOSEI_TEXT_DIM             = 300   # GloVe dimension
+MOSEI_D_MODEL              = 256
+MOSEI_N_HEADS              = 4
+MOSEI_NUM_LAYERS_FUSION    = 2
+MOSEI_NUM_LAYERS_DECODER   = 2
+MOSEI_BETA_HIDDEN          = 128
+MOSEI_DROPOUT              = 0.2
+MOSEI_PREDICTION_THRESHOLD = 0.5
+MOSEI_MAX_LEN_AUDIO        = 600
+MOSEI_MAX_LEN_TEXT         = None
 
-# ---------------------------------------------------------------------------
-# MOSEI online feature extraction (COVAREP + GloVe)
-# ---------------------------------------------------------------------------
-# Clone https://github.com/covarep/covarep and set absolute path:
-COVAREP_ROOT: str = "/Users/beimei/tools/covarep-upstream"
-# macOS: use full path if matlab is not on PATH
-COVAREP_RUNNER_BIN: str = "/Applications/MATLAB_R2026a.app/bin/matlab"
-COVAREP_SCRIPT: str = str(ROOT_DIR / "tools" / "covarep" / "extract_covarep_segment.m")
-COVAREP_TIMEOUT_SEC: float = 900.0
-COVAREP_TARGET_DIM: int = 74
+# ─── COVAREP (MOSEI audio) ─────────────────────────────────────────────────────
+COVAREP_ROOT       = r"C:\Users\HuRoN Lab\audio_to_emotion_server\covarep-upstream"
+COVAREP_RUNNER_BIN = r"C:\Program Files\MATLAB\R2026a\bin\matlab.exe"
+COVAREP_SCRIPT     = str(ROOT_DIR / "tools" / "covarep" / "extract_covarep_segment.m")
+COVAREP_TARGET_DIM = 74
+COVAREP_TIMEOUT_SEC = 30.0
 
-# MOSEI TimestampedWordVectors uses glove.840B.300d (Stanford NLP), NOT wiki-gigaword:
-# https://nlp.stanford.edu/projects/glove/  →  glove.840B.300d.txt
-GLOVE_MODEL_PATH: str = str(ROOT_DIR / "data/glove/glove.840B.300d.txt")
-
-MOSEI_AUDIO_DIM: int = 74
-MOSEI_TEXT_DIM: int = 300
-MOSEI_MAX_LEN_AUDIO: int = 300
-MOSEI_MAX_LEN_TEXT: int = 128
-
-# ---------------------------------------------------------------------------
-# IEMOCAP model hyper-params (defaults from train_fusion_seq_level_decoder.py)
-# ---------------------------------------------------------------------------
-IEMOCAP_D_MODEL: int = 768
-IEMOCAP_N_HEADS: int = 8
-IEMOCAP_NUM_LAYERS_FUSION: int = 2
-IEMOCAP_NUM_LAYERS_DECODER: int = 2
-IEMOCAP_BETA_HIDDEN: int = 256
-IEMOCAP_DROPOUT: float = 0.1
-
-IEMOCAP_LABELS: list[str] = [
-    "angry",
-    "happy",
-    "sad",
-    "neutral",
-    "frustration",
-    "excited",
-]
-
-# ---------------------------------------------------------------------------
-# MOSEI model hyper-params (defaults from train_mosei_fusion_seq_level_decoder.py)
-# ---------------------------------------------------------------------------
-MOSEI_D_MODEL: int = 256
-MOSEI_N_HEADS: int = 4
-MOSEI_NUM_LAYERS_FUSION: int = 2
-MOSEI_NUM_LAYERS_DECODER: int = 2
-MOSEI_BETA_HIDDEN: int = 128
-MOSEI_DROPOUT: float = 0.1
-
-MOSEI_LABELS: list[str] = [
-    "happy",
-    "sad",
-    "anger",
-    "fear",
-    "disgust",
-    "surprise",
-]
-
-# Fallback when checkpoint has no val_calibrated_thresholds (--save_calibrated_ths)
-MOSEI_PREDICTION_THRESHOLD: float = 0.5
+# ─── GloVe (MOSEI text) ────────────────────────────────────────────────────────
+GLOVE_MODEL_PATH = str(ROOT_DIR / "data" / "glove.840B.300d.txt")

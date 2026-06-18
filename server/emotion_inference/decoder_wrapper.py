@@ -22,9 +22,12 @@ from server.config import (
     IEMOCAP_D_MODEL,
     IEMOCAP_DROPOUT,
     IEMOCAP_LABELS,
+    IEMOCAP_MAX_LEN_AUDIO,
+    IEMOCAP_MAX_LEN_TEXT,
     IEMOCAP_N_HEADS,
     IEMOCAP_NUM_LAYERS_DECODER,
     IEMOCAP_NUM_LAYERS_FUSION,
+    MOSEI_AUDIO_DIM,
     MOSEI_BETA_HIDDEN,
     MOSEI_CHECKPOINT,
     MOSEI_D_MODEL,
@@ -34,9 +37,9 @@ from server.config import (
     MOSEI_NUM_LAYERS_DECODER,
     MOSEI_NUM_LAYERS_FUSION,
     MOSEI_PREDICTION_THRESHOLD,
+    MOSEI_TEXT_DIM,
 )
 from server.feature_extraction import SeqFeatures
-from server.config import MOSEI_AUDIO_DIM, MOSEI_TEXT_DIM
 
 
 @dataclass
@@ -96,10 +99,13 @@ class EmotionDecoderWrapper:
 
     def __init__(self, device: Optional[str] = None):
         self._device = device
-        self._iemocap_model: Optional[FusionWithEmotionDecoder] = None
+        self._iemocap_model: Optional[MoseiFusionWithEmotionDecoder] = None
         self._mosei_model: Optional[MoseiFusionWithEmotionDecoder] = None
         self._iemocap_weights_loaded = False
         self._mosei_weights_loaded = False
+        self._iemocap_labels: list[str] = list(IEMOCAP_LABELS)
+        self._iemocap_max_len_audio: int = IEMOCAP_MAX_LEN_AUDIO
+        self._iemocap_max_len_text: int = IEMOCAP_MAX_LEN_TEXT
         self._mosei_thresholds: dict[str, float] = {
             label: float(MOSEI_PREDICTION_THRESHOLD) for label in MOSEI_LABELS
         }
@@ -111,11 +117,15 @@ class EmotionDecoderWrapper:
             self._device = "cuda" if torch.cuda.is_available() else "cpu"
         return torch.device(self._device)
 
-    def _build_iemocap_model(self, ckpt: Optional[dict]) -> FusionWithEmotionDecoder:
+    def _build_iemocap_model(self, ckpt: Optional[dict]) -> MoseiFusionWithEmotionDecoder:
         cfg = (ckpt or {}).get("args", {})
-        model = FusionWithEmotionDecoder(
+        label2id = (ckpt or {}).get("label2id", {})
+        num_emotions = len(label2id) if label2id else len(IEMOCAP_LABELS)
+        model = MoseiFusionWithEmotionDecoder(
+            d_audio=768,
+            d_text=768,
             d_model=cfg.get("d_model", IEMOCAP_D_MODEL),
-            num_emotions=len(IEMOCAP_LABELS),
+            num_emotions=num_emotions,
             n_heads=cfg.get("n_heads", IEMOCAP_N_HEADS),
             num_layers_fusion=cfg.get("num_layers_fusion", IEMOCAP_NUM_LAYERS_FUSION),
             num_layers_decoder=cfg.get("num_layers_decoder", IEMOCAP_NUM_LAYERS_DECODER),
@@ -150,6 +160,16 @@ class EmotionDecoderWrapper:
             state = ckpt.get("model_state_dict", ckpt)
             model.load_state_dict(state)
             self._iemocap_weights_loaded = True
+            # Resolve label order and sequence caps from checkpoint args
+            label2id = ckpt.get("label2id", {})
+            if label2id:
+                id2label = {v: k for k, v in label2id.items()}
+                self._iemocap_labels = [id2label[i] for i in sorted(id2label)]
+            args = ckpt.get("args", {})
+            if "max_len_audio" in args:
+                self._iemocap_max_len_audio = int(args["max_len_audio"])
+            if "max_len_text" in args:
+                self._iemocap_max_len_text = int(args["max_len_text"])
 
         model.eval()
         self._iemocap_model = model
@@ -190,18 +210,27 @@ class EmotionDecoderWrapper:
         h_t = text_feats.hidden.to(self.device)
         m_t = text_feats.key_padding_mask.to(self.device)
 
+        # Truncate to training max lengths to match training conditions
+        if h_a.size(1) > self._iemocap_max_len_audio:
+            h_a = h_a[:, :self._iemocap_max_len_audio, :]
+            m_a = m_a[:, :self._iemocap_max_len_audio]
+        if h_t.size(1) > self._iemocap_max_len_text:
+            h_t = h_t[:, :self._iemocap_max_len_text, :]
+            m_t = m_t[:, :self._iemocap_max_len_text]
+
         logits, beta, _z = model(h_a, h_t, m_a, m_t)
         probs = F.softmax(logits, dim=-1).squeeze(0).cpu().tolist()
 
-        scores = {label: float(prob) for label, prob in zip(IEMOCAP_LABELS, probs)}
-        best_label = IEMOCAP_LABELS[int(logits.argmax(dim=-1).item())]
+        labels = self._iemocap_labels
+        scores = {label: float(prob) for label, prob in zip(labels, probs)}
+        best_label = labels[int(logits.argmax(dim=-1).item())]
 
         beta_mean = float(beta.detach().float().mean().cpu()) if beta is not None else None
 
         return EmotionPrediction(
             benchmark="iemocap",
             transcript=transcript,
-            labels=IEMOCAP_LABELS,
+            labels=labels,
             scores=scores,
             predicted=[best_label],
             weights_loaded=self._iemocap_weights_loaded,
