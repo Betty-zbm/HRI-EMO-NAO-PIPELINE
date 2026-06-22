@@ -16,7 +16,16 @@ from typing import List, Tuple
 
 import numpy as np
 import torch
-from sklearn.metrics import classification_report, f1_score, precision_score, recall_score, roc_auc_score
+from sklearn.metrics import (
+    accuracy_score,
+    average_precision_score,
+    balanced_accuracy_score,
+    classification_report,
+    f1_score,
+    precision_score,
+    recall_score,
+    roc_auc_score,
+)
 from torch.utils.data import DataLoader, Dataset
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -124,19 +133,34 @@ def report(split: str, probs: np.ndarray, y_cont: np.ndarray,
     macro_f1 = f1_score(y_bin, y_pred_05,  average="macro", zero_division=0)
     cal_mf1  = f1_score(y_bin, y_pred_cal, average="macro", zero_division=0)
 
-    pc_auc = []
+    pc_auc, pc_ap = [], []
     for c in range(probs.shape[1]):
         col = y_bin[:, c]
         if col.max() > 0 and col.min() < 1:
             pc_auc.append(float(roc_auc_score(col, probs[:, c])))
+            pc_ap.append(float(average_precision_score(col, probs[:, c])))
         else:
             pc_auc.append(float("nan"))
+            pc_ap.append(float("nan"))
     macro_auc = float(np.nanmean(pc_auc))
+    macro_ap  = float(np.nanmean(pc_ap))
 
     pc_f1_05  = f1_score(y_bin, y_pred_05,  average=None, zero_division=0)
     pc_f1_cal = f1_score(y_bin, y_pred_cal, average=None, zero_division=0)
     pc_prec   = precision_score(y_bin, y_pred_cal, average=None, zero_division=0)
     pc_rec    = recall_score(y_bin,    y_pred_cal, average=None, zero_division=0)
+
+    # Per-class binary accuracy (@ calibrated thresholds), for display only
+    pc_acc = np.array([accuracy_score(y_bin[:, c], y_pred_cal[:, c])
+                       for c in range(y_bin.shape[1])])
+
+    # Weighted Accuracy (Tong et al., 2017 -- "Combating Human Trafficking with
+    # Multimodal Deep Models"; used by MOSEI emotion papers e.g. Akhtar et al. 2019).
+    # WAcc_c = 0.5*sensitivity_c + 0.5*specificity_c = balanced accuracy per class,
+    # then averaged across the 6 emotion labels. NOT support-weighted plain accuracy.
+    pc_wacc = np.array([balanced_accuracy_score(y_bin[:, c], y_pred_cal[:, c])
+                        for c in range(y_bin.shape[1])])
+    weighted_acc = float(np.mean(pc_wacc))
 
     sep = "=" * 60
     print(f"\n{sep}")
@@ -145,16 +169,19 @@ def report(split: str, probs: np.ndarray, y_cont: np.ndarray,
     print(f"  micro-F1 @ 0.5       : {micro_f1:.4f}")
     print(f"  macro-F1 @ 0.5       : {macro_f1:.4f}")
     print(f"  macro-AUC            : {macro_auc:.4f}")
+    print(f"  macro-AP             : {macro_ap:.4f}")
     print(f"  macro-F1 @ calibrated: {cal_mf1:.4f}")
+    print(f"  weighted accuracy    : {weighted_acc:.4f}  (Tong et al. 2017: mean of per-class balanced accuracy)")
     print()
 
     print(f"  Per-class (calibrated thresholds):")
-    hdr = f"  {'name':<9}  thr   AUC     F1@0.5  F1@cal  P@cal   R@cal"
+    hdr = f"  {'name':<9}  thr   AUC     AP      Acc     WAcc    F1@0.5  F1@cal  P@cal   R@cal"
     print(hdr)
-    print("  " + "-" * 58)
+    print("  " + "-" * 84)
     for i, name in enumerate(names):
         auc_s = f"{pc_auc[i]:.4f}" if not np.isnan(pc_auc[i]) else "  N/A "
-        print(f"  {name:<9}  {cal_ths[i]:.2f}  {auc_s}  "
+        ap_s  = f"{pc_ap[i]:.4f}"  if not np.isnan(pc_ap[i])  else "  N/A "
+        print(f"  {name:<9}  {cal_ths[i]:.2f}  {auc_s}  {ap_s}  {pc_acc[i]:.4f}  {pc_wacc[i]:.4f}  "
               f"{pc_f1_05[i]:.4f}  {pc_f1_cal[i]:.4f}  "
               f"{pc_prec[i]:.4f}  {pc_rec[i]:.4f}")
 

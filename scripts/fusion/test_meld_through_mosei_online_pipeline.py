@@ -28,7 +28,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
-from sklearn.metrics import accuracy_score, f1_score
+from sklearn.metrics import accuracy_score, balanced_accuracy_score, f1_score
 from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -240,13 +240,16 @@ def main() -> None:
     macro_f1_6 = f1_score(true6_arr, pred6_arr, average="macro", zero_division=0)
     micro_f1_6 = f1_score(true6_arr, pred6_arr, average="micro", zero_division=0)
     pc_f1_6 = f1_score(true6_arr, pred6_arr, average=None, zero_division=0)
+    pc_wacc_6 = np.array([balanced_accuracy_score(true6_arr[:, c], pred6_arr[:, c])
+                          for c in range(true6_arr.shape[1])])
+    wacc_6 = float(np.mean(pc_wacc_6))
 
     log("\n" + "=" * 60)
     log("MELD -> MOSEI 6-CLASS EMOTION (cross-corpus, online pipeline)")
     log(f"N={len(rows)}")
-    log(f"macro-F1={macro_f1_6:.4f}  micro-F1={micro_f1_6:.4f}")
-    for name, f1v in zip(MOSEI_EMO_COLS, pc_f1_6):
-        log(f"  {name.replace('emo_',''):<9} F1={f1v:.4f}")
+    log(f"macro-F1={macro_f1_6:.4f}  micro-F1={micro_f1_6:.4f}  weighted-accuracy={wacc_6:.4f}")
+    for name, f1v, wav in zip(MOSEI_EMO_COLS, pc_f1_6, pc_wacc_6):
+        log(f"  {name.replace('emo_',''):<9} F1={f1v:.4f}  WAcc={wav:.4f}")
 
     pred2_arr = np.array([r["pred2"] for r in rows])
     true2_arr = np.array([r["true2"] for r in rows])
