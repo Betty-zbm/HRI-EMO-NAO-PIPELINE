@@ -25,7 +25,10 @@ import uuid
 # ---------------------------------------------------------------------------
 SERVER_HOST = "192.168.1.107"  # LAN IP of the machine running ``python -m server.main``
 SERVER_PORT = 8000
-SERVER_BENCHMARK = "iemocap"  # ``iemocap`` or ``mosei``
+# None = use the checkpoint + output settings configured on the platform
+# (http://<SERVER_HOST>:<SERVER_PORT>/platform). Set to "iemocap" or "mosei"
+# only to force the legacy fixed benchmarks.
+SERVER_BENCHMARK = None
 
 RECORD_DIR = "/home/nao/recordings"
 RECORD_BASENAME = "hri_emo_capture.wav"
@@ -222,8 +225,12 @@ class EmotionClient(object):
         with open(wav_path, "rb") as handle:
             audio_bytes = handle.read()
 
+        fields = []
+        if SERVER_BENCHMARK:
+            fields.append(("benchmark", SERVER_BENCHMARK))
+
         body, content_type = _encode_multipart(
-            fields=[("benchmark", SERVER_BENCHMARK)],
+            fields=fields,
             files=[("audio", os.path.basename(wav_path), audio_bytes, "audio/wav")],
         )
 

@@ -20,6 +20,9 @@ env/
 .env
 .env.*
 
+# Platform runtime state (machine-specific)
+server/runtime_settings.json
+
 # Jupyter & temp files
 *.ipynb_checkpoints/
 __pycache__/
