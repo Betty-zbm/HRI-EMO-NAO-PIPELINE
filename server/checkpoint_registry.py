@@ -7,9 +7,10 @@ solves (single-label vs multi-label), and user-facing guidance text shown in
 the platform UI.
 
 Only checkpoints that have been validated through the *online* pipeline
-(raw WAV -> Whisper -> live features -> model) are exposed here. Legacy runs
-(e.g. ``iemocap_fusion_seq_decoder_v*``, ``mosei_fusion_decoder_v2``) are
-intentionally not registered.
+(raw WAV -> Whisper -> live features -> model) are exposed here. Other training
+runs under ``runs/`` are intentionally not registered, either because they were
+superseded (``runs/iemocap_fusion_seq_decoder_v*``, ``runs/mosei_6cls_v3``) or
+because they scored too low to be useful (``runs/mosei_4cls``).
 """
 from __future__ import annotations
 
@@ -129,7 +130,7 @@ _CHECKPOINTS: list[CheckpointInfo] = [
         dataset="MOSEI",
         task="multi_label",
         feature_family="covarep_glove",
-        checkpoint_path=_run("mosei_6cls_v3/best_mosei_6cls.pt"),
+        checkpoint_path=_run("mosei_fusion_decoder_v2/best_mosei_fusion_decoder.pt"),
         # Order matches training emo_cols; overridden by ckpt["emo_cols"] at load
         labels=["happy", "sad", "angry", "fear", "disgust", "surprise"],
         description=(
@@ -144,7 +145,7 @@ _CHECKPOINTS: list[CheckpointInfo] = [
             "Ideal for post-experiment analysis of recorded participant audio, "
             "where per-utterance latency does not matter."
         ),
-        metrics={"val_calibrated_macro_f1": 0.4246, "val_macro_auc": 0.6880},
+        metrics={"val_calibrated_macro_f1": 0.4256, "val_macro_auc": 0.6893},
         has_calibrated_thresholds=True,
         latency="~7 s per utterance",
         startup_note="first request: ~7 min one-time (MATLAB + GloVe load)",
