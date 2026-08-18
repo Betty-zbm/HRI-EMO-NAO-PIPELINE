@@ -1,139 +1,100 @@
-# HRI-EMO: Adaptive Unified Multimodal Emotion Recognition
+# HRI-EMO-NAO-PIPELINE
 
-[License](LICENSE)
-[Python](https://www.python.org/)
-[PyTorch](https://pytorch.org/)
+A deployed multimodal emotion recognition pipeline for the **NAO** robot, with a
+web platform where an experimenter chooses the model and the output format
+without editing code.
 
-**HRI-EMO** is a robust and interpretable framework for multimodal emotion recognition. It integrates an **adaptive cross-modal fusion mechanism** with an **emotion-level Transformer decoder**, designed to achieve both robust representation learning and fine-grained interpretability for Human–Robot Interaction (HRI) tasks.
-
-> **Key Feature:** Unlike black-box models, HRI-EMO tells you *why* it predicts an emotion by visualizing cross-modal alignment and emotion-specific attention.
-
----
-
-
-
-## 🌟 Key Features
-
-- **Adaptive Fusion (β-Gating)**: A vector-wise gating mechanism that dynamically weights Audio vs. Text modalities based on signal reliability.
-- **Dual-Level Interpretability**:
-  1. **Encoder Level**: Visualizes Audio-Text alignment (which audio frames align with which words).
-  2. **Decoder Level**: Visualizes Emotion Attribution (which part of the sequence triggered a specific emotion like "Happy" or "Fear").
-- **Robustness**: Optimized "v2" architecture (Simplified Fusion + High Dropout) prevents overfitting on noisy datasets like MOSEI.
-- **Unified Framework**: Modular design supporting both Sequence-level and Utterance-level features.
+The robot records speech and speaks a reaction. Everything in between —
+transcription, feature extraction, inference — runs on a separate server, because
+NAO's onboard computer cannot host these models. One HTTP endpoint connects the
+two.
 
 ---
 
+## The pipeline
 
+![End-to-end prediction pipeline](assets/pipeline.png)
 
-## 🏗️ Architecture
+A Choregraphe script on the robot detects speech, records a mono 16 kHz WAV, and
+posts it to the server. The server decodes the audio, truncates it to ten
+seconds, transcribes it with Whisper, extracts audio and text features live, runs
+the selected checkpoint, and returns JSON. The robot speaks the result.
 
+Which feature extractor runs is decided by the active checkpoint: WavLM + BERT
+for the IEMOCAP and MELD models, COVAREP + GloVe for the MOSEI models. Nothing on
+the robot has to change when the model changes.
 
+## The server and the platform
 
-## Quick Start — server & configuration platform
+![Server and platform architecture](assets/architecture.png)
+
+The robot and the browser both post to the same `/predict` endpoint. A separate
+configuration API backs the platform page, where the active checkpoint and the
+output policy are selected and saved to a JSON file that takes effect on the next
+request. No restart, and no edit to the robot script.
+
+The platform has three tabs: **Model Settings** to pick the checkpoint and output
+format, **Playground** to record from the browser and see the transcript and the
+prediction, and **NAO Integration** to generate the Choregraphe script with the
+server address already filled in.
+
+---
+
+## Quick start
 
 ```bash
-cd <repo-root>
-<your-venv>/bin/python -m uvicorn server.main:app --host 0.0.0.0 --port 8000
+python -m venv venv && source venv/bin/activate   # Windows: venv\Scripts\activate
+pip install -r requirements.txt
+uvicorn server.main:app --host 0.0.0.0 --port 8000
 ```
 
-Then open **[http://localhost:8000/platform](http://localhost:8000/platform)** to pick the checkpoint / output
-settings, test inference in the browser, and generate the NAO Choregraphe
-script. Full instructions (venv details, reload mode, NAO setup):
-[server/README.md](server/README.md).
+Then open **http://localhost:8000/platform**.
 
-## 1. Transfer Learning for Feature Representation
+To check the whole chain in one click, without a microphone:
+**http://localhost:8000/platform?demo=1#playground** — it sends a built-in clip
+through the pipeline and shows the transcript and the prediction.
 
-Based on transfer learning, we first extract deep contextual representations from both modalities using large pretrained models:
+Trained weights live in `runs/`, which is gitignored, so a fresh clone does not
+have them. A checkpoint whose file is missing is shown as unavailable on the
+platform and the rest keeps working. Full setup, including the optional MATLAB
+and GloVe requirements for the MOSEI models, is in
+**[server/README.md](server/README.md)**.
 
-$$
-h_\text{text} = \text{Pool}\big(\text{BERT}(\text{Tokenizer}(x_\text{text}))\big)
-\quad\in\mathbb{R}^{d_t}
-$$
+## Checkpoints
 
-$$
-h_\text{audio} = \text{MeanPool}\big(\text{WavLM}(\text{FeatureExtractor}(x_\text{audio}))\big)
-\quad\in\mathbb{R}^{d_a}
-$$
+| Checkpoint | Task | Features | Notes |
+|---|---|---|---|
+| MELD 4-class | angry / happy / neutral / sad | WavLM + BERT | Recommended for live interaction |
+| MELD sentiment | negative / positive | WavLM + BERT | Most reliable of the five |
+| IEMOCAP 4-class | angry / happy / neutral / sad | WavLM + BERT | Acted speech, quiet room |
+| MOSEI 6-emotion | multi-label over six emotions | COVAREP + GloVe | ~7 s per utterance; for recorded audio |
+| MOSEI sentiment | negative / positive | COVAREP + GloVe | Same latency caveat |
 
-These embeddings capture semantic, syntactic, and acoustic-prosodic information, respectively.
+The two MOSEI models call MATLAB for COVAREP features, so they are meant for
+post-session analysis rather than live interaction. Metrics and usage guidance
+for each are in `server/checkpoint_registry.py` and on the platform cards.
 
-## 2. Adaptive Cross-Modal Fusion
+## Repository layout
 
-To achieve semantic alignment and dynamic weighting across modalities,  
-we adopt a Transformer-based cross-modal encoder combined with a  vector-wise adaptive gating mechanism.
+```
+server/          FastAPI server, configuration platform, NAO client script
+models/          Model components: cross-modal block, beta gate, decoder
+scripts/         Feature extraction, training, offline and online evaluation
+tools/           COVAREP bridge and plotting utilities
+tests/           Unit tests for the model components
+runs/            Trained checkpoints (gitignored)
+```
 
-1. **Cross-Modal Transformer — semantic alignment & redundancy reduction**
+## The recognition model
 
-Each modality first passes through an *intra-modal self-attention* layer  
-to filter redundant information, followed by *bidirectional cross-attention*  
-to exchange context:
+The model is an adaptive cross-modal Transformer: intra-modal self-attention and
+bidirectional cross-attention align the audio and text streams, a vector-wise
+β-gate weights the two modalities per feature dimension, and an emotion-level
+decoder gives each emotion its own query vector. Single-label checkpoints use a
+softmax head, the MOSEI 6-emotion checkpoint uses per-class sigmoids with
+thresholds calibrated on the validation set.
 
-$$
-\tilde{h}_a, \tilde{h}_t = \text{CrossModalTransformer}(h_a, h_t)
-$$
-
-Residual connections and LayerNorm are applied after every attention and  
-feed-forward block to ensure stability.
-
-1. **Vector-wise β-Gating — fine-grained adaptive fusion**
-
-Instead of a single scalar gate, the model predicts a *per-dimension* weight vector $\mathbf{β}\in[0,1]^d$ that controls the contribution of each feature dimension from audio and text:
-
-$$
-h_{\text{fusion}} = \mathbf{β}\odot\tilde{h}_a + (1-\mathbf{β})\odot\tilde{h}_t
-$$
-
-where $\odot$ denotes element-wise multiplication.  
-Each component $β_j$ adaptively balances the $j$-th semantic dimension, allowing some latent features to rely more on acoustic cues while others emphasize linguistic information. A mean-pooled β-value is logged for interpretability.
-
-This design—TACFN-style intra + cross attention + vector gating—enhances:
-
-- **Robustness**, by dynamically down-weighting noisy modalities per feature.
-- **Explainability**, by revealing modality preference across feature dimensions.
-
-
-
-## 3. Emotion-Level Transformer Decoder
-
-Subsequently, an emotion-level Transformer decoder is introduced.
-Each emotion query vector 𝑞_𝑖 interacts with the fused representation to extract emotion-oriented contextual information:
-
-$$
-z_i = \text{DecoderBlock}(q_i, h_{\text{fusion}})
-$$
-
-The resulting vectors $z_i_{i=1}^{N_e}$ correspond to different emotion categories (e.g., happiness, sadness, anger).
-This architecture enables:
-
-- Adaptive fusion at the modality level (via β-gating)
-- Fine-grained interpretability at the emotion level (via query-based decoding)
-
-
-
-## 4. Model Objective
-
-For multi-label emotion recognition, the decoder outputs are fed into independent classifiers:
-
-$$
-\hat{y}_i = \sigma(W_i z_i + b_i)
-$$
-
-and the model is optimized using binary cross-entropy loss:
-
-$$
-L = - \sum_i [y_i \log \hat{y}_i + (1 - y_i) \log(1 - \hat{y}_i)]
-$$
-
-## Dataset and Evaluation
-
-Consistent with prior studies, the IEMOCAP dataset is used for training, validation, and testing.
-This dataset provides synchronized speech–text pairs annotated across multiple emotion dimensions, making it ideal for multimodal emotion modeling and interpretability studies.
-
-## Summary
-
-In summary, the proposed framework combines adaptive β-gating fusion with an emotion-level decoder, simultaneously achieving:
-
-- Robustness at the modality layer (through dynamic weighting and semantic alignment)
-- Interpretability at the emotion layer (through emotion query-based decoding)
-
-This dual-level adaptivity maintains computational efficiency while enhancing the model’s discriminative power and transparency in multi-label emotion recognition. -->
+The architecture comes from an earlier MEng project in the same lab
+([Makiato1999/HRI-EMO](https://github.com/Makiato1999/HRI-EMO)). This repository
+retrains it, deploys it as a live service, measures what the deployment costs,
+and adds the configuration platform.
